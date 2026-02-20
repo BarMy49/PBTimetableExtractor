@@ -1,6 +1,8 @@
 import requests
 import re
 import json
+from datetime import datetime, date, timedelta
+import uuid
 
 link = "https://degra.wi.pb.edu.pl/rozklady/rozklad.php?page=student&studia=INF2&semestr=1&spec=X&grw=1&grcw=2&grps=4&grp=1&grl=4&grj=1&grs=1&grwf=1"
 
@@ -64,12 +66,85 @@ class ScheduleParser:
                 })
         return results
 
+    def parse_from_link(self):
+        html = self.get_schedule()
+        if not html:
+            return []
+        return self.parse(html)
 
+
+class IcsBuilder:
+    def __init__(self):
+        self._week_map = {
+            "tyg. i": 0,
+            "tyg. ii": 1,
+        }
+
+    def _week_parity(self, d: date, semester_start: date) -> int:
+        return ((d - semester_start).days // 7) % 2
+
+    def _matches_week(self, week_value, parity: int) -> bool:
+        if week_value is None:
+            return True
+        return self._week_map.get(str(week_value).lower()) == parity
+
+    def _iter_dates(self, start: date, end: date):
+        current = start
+        while current <= end:
+            yield current
+            current += timedelta(days=1)
+
+    def build(self, events, semester_start: str, semester_end: str) -> str:
+        start_date = datetime.strptime(semester_start, "%Y-%m-%d").date()
+        end_date = datetime.strptime(semester_end, "%Y-%m-%d").date()
+        lines = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//PBTimetableExtractor//PL",
+            "CALSCALE:GREGORIAN",
+        ]
+
+        for d in self._iter_dates(start_date, end_date):
+            parity = self._week_parity(d, start_date)
+            for e in events:
+                if e.get("day") != d.weekday():
+                    continue
+                if not self._matches_week(e.get("week"), parity):
+                    continue
+                start_dt = datetime.combine(d, datetime.strptime(e["start"], "%H:%M").time())
+                end_dt = datetime.combine(d, datetime.strptime(e["end"], "%H:%M").time())
+                summary = f'{e["subject"]} ({e["class_type"]})'.strip()
+                description = f'Prowadzący: {e["lecturer"]}'
+                if e.get("group"):
+                    description += f', grupa {e["group"]}'
+                lines.extend([
+                    "BEGIN:VEVENT",
+                    f"UID:{uuid.uuid4()}",
+                    f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%S')}",
+                    f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%S')}",
+                    f"SUMMARY:{summary}",
+                    f"LOCATION:{e['room']}",
+                    f"DESCRIPTION:{description}",
+                    "END:VEVENT",
+                ])
+
+        lines.append("END:VCALENDAR")
+        return "\n".join(lines)
+
+    def write_file(self, path: str, ics_content: str):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(ics_content)
 
 
 if __name__ == "__main__":
     parser = ScheduleParser(link)
-    schedule = parser.get_schedule()
-    if schedule:
-        classes = parser.parse(schedule)
-        print(json.dumps(classes, ensure_ascii=False, indent=2))
+    classes = parser.parse_from_link()
+    print(json.dumps(classes, ensure_ascii=False, indent=2))
+
+    ics_builder = IcsBuilder()
+    ics_content = ics_builder.build(
+        classes,
+        semester_start="2026-02-23",
+        semester_end="2026-06-19",
+    )
+    ics_builder.write_file("schedule.ics", ics_content)
