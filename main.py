@@ -94,12 +94,23 @@ class IcsBuilder:
             yield current
             current += timedelta(days=1)
 
-    def build(self, events, semester_start: str, semester_end: str, free_days=None) -> str:
+    def _normalize_week(self, week_value):
+        if week_value is None:
+            return None
+        if isinstance(week_value, int):
+            return week_value
+        return self._week_map.get(str(week_value).lower())
+
+    def build(self, events, semester_start: str, semester_end: str, free_days=None, day_overrides=None) -> str:
         start_date = datetime.strptime(semester_start, "%Y-%m-%d").date()
         end_date = datetime.strptime(semester_end, "%Y-%m-%d").date()
         free_set = {
             datetime.strptime(d, "%Y-%m-%d").date()
             for d in (free_days or [])
+        }
+        overrides = {
+            datetime.strptime(d, "%Y-%m-%d").date(): v
+            for d, v in (day_overrides or {}).items()
         }
         lines = [
             "BEGIN:VCALENDAR",
@@ -111,9 +122,14 @@ class IcsBuilder:
         for d in self._iter_dates(start_date, end_date):
             if d in free_set:
                 continue
-            parity = self._week_parity(d, start_date)
+            override = overrides.get(d, {})
+            parity = self._normalize_week(override.get("week"))
+            if parity is None:
+                parity = self._week_parity(d, start_date)
+            target_day = override.get("day", d.weekday())
+
             for e in events:
-                if e.get("day") != d.weekday():
+                if e.get("day") != target_day:
                     continue
                 if not self._matches_week(e.get("week"), parity):
                     continue
@@ -155,5 +171,15 @@ if __name__ == "__main__":
         free_days=["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-04-07", "2026-04-10", "2026-04-11",
                    "2026-04-12", "2026-04-13", "2026-04-14", "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-24",
                    "2026-06-04", "2026-04-05"],
+        day_overrides={
+            "2026-04-08": {"day": 4, "week": "tyg. II"},
+            "2026-05-08": {"day": 4, "week": "tyg. II"},
+            "2026-05-22": {"day": 4, "week": "tyg. II"},
+            "2026-06-03": {"day": 4, "week": "tyg. II"},
+            "2026-04-30": {"day": 4, "week": "tyg. I"},
+            "2026-05-15": {"day": 4, "week": "tyg. I"},
+            "2026-05-29": {"day": 4, "week": "tyg. I"},
+            "2026-06-12": {"day": 4, "week": "tyg. I"}
+        },
     )
     ics_builder.write_file("schedule.ics", ics_content)
