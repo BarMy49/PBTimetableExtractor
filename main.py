@@ -4,9 +4,6 @@ import json
 from datetime import datetime, date, timedelta
 import uuid
 
-link = "https://degra.wi.pb.edu.pl/rozklady/rozklad.php?page=student&studia=INF2&semestr=1&spec=X&grw=1&grcw=2&grps=4&grp=1&grl=4&grj=1&grs=1&grwf=1"
-
-
 class ScheduleParser:
     def __init__(self, link=None):
         self._pattern = re.compile(
@@ -159,6 +156,7 @@ class IcsBuilder:
 
 
 if __name__ == "__main__":
+    link = "https://degra.wi.pb.edu.pl/rozklady/rozklad.php?page=student&studia=INF2&semestr=1&spec=X&grw=1&grcw=2&grps=4&grp=1&grl=4&grj=1&grs=1&grwf=1"
     parser = ScheduleParser(link)
     classes = parser.parse_from_link()
     print(json.dumps(classes, ensure_ascii=False, indent=2))
