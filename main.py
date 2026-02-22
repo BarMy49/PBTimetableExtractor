@@ -94,9 +94,13 @@ class IcsBuilder:
             yield current
             current += timedelta(days=1)
 
-    def build(self, events, semester_start: str, semester_end: str) -> str:
+    def build(self, events, semester_start: str, semester_end: str, free_days=None) -> str:
         start_date = datetime.strptime(semester_start, "%Y-%m-%d").date()
         end_date = datetime.strptime(semester_end, "%Y-%m-%d").date()
+        free_set = {
+            datetime.strptime(d, "%Y-%m-%d").date()
+            for d in (free_days or [])
+        }
         lines = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
@@ -105,6 +109,8 @@ class IcsBuilder:
         ]
 
         for d in self._iter_dates(start_date, end_date):
+            if d in free_set:
+                continue
             parity = self._week_parity(d, start_date)
             for e in events:
                 if e.get("day") != d.weekday():
@@ -146,5 +152,8 @@ if __name__ == "__main__":
         classes,
         semester_start="2026-02-23",
         semester_end="2026-06-19",
+        free_days=["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-04-07", "2026-04-10", "2026-04-11",
+                   "2026-04-12", "2026-04-13", "2026-04-14", "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-24",
+                   "2026-06-04", "2026-04-05"],
     )
     ics_builder.write_file("schedule.ics", ics_content)
