@@ -1,8 +1,14 @@
 import requests
 import re
 import json
+import os
+import pickle
 from datetime import datetime, date, timedelta
 import uuid
+from collections import defaultdict
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
 class ScheduleParser:
     def __init__(self, link=None):
@@ -98,7 +104,7 @@ class IcsBuilder:
             return week_value
         return self._week_map.get(str(week_value).lower())
 
-    def build(self, events, semester_start: str, semester_end: str, free_days=None, day_overrides=None) -> str:
+    def expand_occurrences(self, events, semester_start: str, semester_end: str, free_days=None, day_overrides=None):
         start_date = datetime.strptime(semester_start, "%Y-%m-%d").date()
         end_date = datetime.strptime(semester_end, "%Y-%m-%d").date()
         free_set = {
@@ -109,13 +115,8 @@ class IcsBuilder:
             datetime.strptime(d, "%Y-%m-%d").date(): v
             for d, v in (day_overrides or {}).items()
         }
-        lines = [
-            "BEGIN:VCALENDAR",
-            "VERSION:2.0",
-            "PRODID:-//PBTimetableExtractor//PL",
-            "CALSCALE:GREGORIAN",
-        ]
 
+        occurrences = []
         for d in self._iter_dates(start_date, end_date):
             if d in free_set:
                 continue
@@ -130,22 +131,53 @@ class IcsBuilder:
                     continue
                 if not self._matches_week(e.get("week"), parity):
                     continue
+
                 start_dt = datetime.combine(d, datetime.strptime(e["start"], "%H:%M").time())
                 end_dt = datetime.combine(d, datetime.strptime(e["end"], "%H:%M").time())
                 summary = f'{e["subject"]} ({e["class_type"]})'.strip()
                 description = f'Prowadzący: {e["lecturer"]}'
                 if e.get("group"):
                     description += f', grupa {e["group"]}'
-                lines.extend([
-                    "BEGIN:VEVENT",
-                    f"UID:{uuid.uuid4()}",
-                    f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%S')}",
-                    f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%S')}",
-                    f"SUMMARY:{summary}",
-                    f"LOCATION:{e['room']}",
-                    f"DESCRIPTION:{description}",
-                    "END:VEVENT",
-                ])
+
+                occurrences.append({
+                    "start": start_dt,
+                    "end": end_dt,
+                    "summary": summary,
+                    "location": e["room"],
+                    "description": description,
+                    "lecturer": e["lecturer"],
+                    "group": e.get("group"),
+                })
+
+        return occurrences
+
+    def build(self, events, semester_start: str, semester_end: str, free_days=None, day_overrides=None) -> str:
+        occurrences = self.expand_occurrences(
+            events=events,
+            semester_start=semester_start,
+            semester_end=semester_end,
+            free_days=free_days,
+            day_overrides=day_overrides,
+        )
+
+        lines = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//PBTimetableExtractor//PL",
+            "CALSCALE:GREGORIAN",
+        ]
+
+        for occ in occurrences:
+            lines.extend([
+                "BEGIN:VEVENT",
+                f"UID:{uuid.uuid4()}",
+                f"DTSTART:{occ['start'].strftime('%Y%m%dT%H%M%S')}",
+                f"DTEND:{occ['end'].strftime('%Y%m%dT%H%M%S')}",
+                f"SUMMARY:{occ['summary']}",
+                f"LOCATION:{occ['location']}",
+                f"DESCRIPTION:{occ['description']}",
+                "END:VEVENT",
+            ])
 
         lines.append("END:VCALENDAR")
         return "\n".join(lines)
@@ -155,11 +187,103 @@ class IcsBuilder:
             f.write(ics_content)
 
 
+class GCalendarBuilder:
+    SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+    def __init__(self, credentials_path="credentials.json", token_path="token.pickle", app_name="PBTimetableExtractor"):
+        self.credentials_path = credentials_path
+        self.token_path = token_path
+        self.app_name = app_name
+        self.service = self._build_service()
+
+    def _build_service(self):
+        creds = None
+        if self.token_path and os.path.exists(self.token_path):
+            with open(self.token_path, "rb") as token_file:
+                creds = pickle.load(token_file)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, self.SCOPES)
+                creds = flow.run_local_server(port=0)
+
+            with open(self.token_path, "wb") as token_file:
+                pickle.dump(creds, token_file)
+
+        return build("calendar", "v3", credentials=creds)
+
+    def _group_for_series(self, occurrences):
+        groups = defaultdict(list)
+        for occ in occurrences:
+            key = (
+                occ["summary"],
+                occ["location"],
+                occ["description"],
+                occ["start"].time().strftime("%H:%M:%S"),
+                occ["end"].time().strftime("%H:%M:%S"),
+            )
+            groups[key].append(occ)
+        return groups
+
+    def _iter_managed_events(self, calendar_id: str):
+        page_token = None
+        while True:
+            resp = self.service.events().list(
+                calendarId=calendar_id,
+                maxResults=2500,
+                singleEvents=False,
+                pageToken=page_token,
+                privateExtendedProperty="pbte=1",
+            ).execute()
+            for item in resp.get("items", []):
+                yield item
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+    def sync(self, calendar_id: str, occurrences, timezone="Europe/Warsaw", purge_managed=True):
+        if purge_managed:
+            for ev in self._iter_managed_events(calendar_id):
+                self.service.events().delete(calendarId=calendar_id, eventId=ev["id"]).execute()
+
+        grouped = self._group_for_series(occurrences)
+
+        for (summary, location, description, start_time, end_time), items in grouped.items():
+            items = sorted(items, key=lambda x: x["start"])
+            first = items[0]
+            start_iso = first["start"].isoformat()
+            end_iso = first["end"].isoformat()
+
+            body = {
+                "summary": summary,
+                "location": location,
+                "description": description,
+                "start": {"dateTime": start_iso, "timeZone": timezone},
+                "end": {"dateTime": end_iso, "timeZone": timezone},
+                "extendedProperties": {
+                    "private": {
+                        "pbte": "1",
+                        "source": self.app_name,
+                    }
+                },
+            }
+
+            if len(items) > 1:
+                rdates = ",".join(x["start"].strftime("%Y%m%dT%H%M%S") for x in items[1:])
+                body["recurrence"] = [f"RDATE;TZID={timezone}:{rdates}"]
+
+            self.service.events().insert(calendarId=calendar_id, body=body).execute()
+
+
 if __name__ == "__main__":
     link = "https://degra.wi.pb.edu.pl/rozklady/rozklad.php?page=student&studia=INF2&semestr=1&spec=X&grw=1&grcw=2&grps=4&grp=1&grl=4&grj=1&grs=1&grwf=1"
     parser = ScheduleParser(link)
     classes = parser.parse_from_link()
     print(json.dumps(classes, ensure_ascii=False, indent=2))
+
+    # Generowanie pliku .ics:
 
     ics_builder = IcsBuilder()
     ics_content = ics_builder.build(
@@ -181,3 +305,25 @@ if __name__ == "__main__":
         },
     )
     ics_builder.write_file("schedule.ics", ics_content)
+
+    # Upload do Google Calendar (odkomentuj po konfiguracji OAuth):
+    occurrences = ics_builder.expand_occurrences(
+        classes,
+        semester_start="2026-02-23",
+        semester_end="2026-06-19",
+        free_days=["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-04-07", "2026-04-10", "2026-04-11",
+                   "2026-04-12", "2026-04-13", "2026-04-14", "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-24",
+                   "2026-06-04", "2026-04-05"],
+        day_overrides={
+            "2026-04-08": {"day": 4, "week": "tyg. II"},
+            "2026-05-08": {"day": 4, "week": "tyg. II"},
+            "2026-05-22": {"day": 4, "week": "tyg. II"},
+            "2026-06-03": {"day": 4, "week": "tyg. II"},
+            "2026-04-30": {"day": 4, "week": "tyg. I"},
+            "2026-05-15": {"day": 4, "week": "tyg. I"},
+            "2026-05-29": {"day": 4, "week": "tyg. I"},
+            "2026-06-12": {"day": 4, "week": "tyg. I"}
+        },
+    )
+    gcal = GCalendarBuilder(credentials_path="credentials.json", token_path="token.pickle")
+    gcal.sync(calendar_id="8d2531d4acdb3ec2b84565f33372d00b60085e617ca3d31843f4a101b214d27e@group.calendar.google.com", occurrences=occurrences, timezone="Europe/Warsaw")
