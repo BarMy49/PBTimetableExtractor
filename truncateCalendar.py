@@ -53,5 +53,5 @@ def delete_all_events(calendar_id):
     print(f"\nTotal deleted: {total_deleted}")
 
 if __name__ == "__main__":
-    calendar_id = "3e14e54c80d13e38d9dc2c84fcc523b3d6a734f3bc064a8e4172b2512c246adb@group.calendar.google.com"
+    calendar_id = "fb71fba1febe4271f784c839e1c5b73d01e417d257c9036ae04c54d0d6565187@group.calendar.google.com"
     delete_all_events(calendar_id)

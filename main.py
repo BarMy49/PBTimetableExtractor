@@ -84,7 +84,8 @@ class IcsBuilder:
         }
 
     def _week_parity(self, d: date, semester_start: date) -> int:
-        return ((d - semester_start).days // 7) % 2
+        start_of_week = semester_start - timedelta(days=semester_start.weekday())
+        return ((d - start_of_week).days // 7) % 2
 
     def _matches_week(self, week_value, parity: int) -> bool:
         if week_value is None:
@@ -104,7 +105,7 @@ class IcsBuilder:
             return week_value
         return self._week_map.get(str(week_value).lower())
 
-    def expand_occurrences(self, events, semester_start: str, semester_end: str, free_days=None, day_overrides=None):
+    def build_google(self, events, semester_start: str, semester_end: str, free_days=None, day_overrides=None):
         start_date = datetime.strptime(semester_start, "%Y-%m-%d").date()
         end_date = datetime.strptime(semester_end, "%Y-%m-%d").date()
         free_set = {
@@ -278,52 +279,28 @@ class GCalendarBuilder:
 
 
 if __name__ == "__main__":
-    link = "https://degra.wi.pb.edu.pl/rozklady/rozklad.php?page=student&studia=INF2&semestr=1&spec=X&grw=1&grcw=2&grps=4&grp=1&grl=4&grj=1&grs=1&grwf=1"
+    link = "https://degra.wi.pb.edu.pl/rozklady/rozklad.php?page=student&studia=INF2&semestr=2&spec=ITI&grw=1&grcw=1&grps=1&grp=1&grl=1&grj=1&grs=1&grwf=1"
     parser = ScheduleParser(link)
     classes = parser.parse_from_link()
     print(json.dumps(classes, ensure_ascii=False, indent=2))
 
     # Generowanie pliku .ics:
+    # ics_builder = IcsBuilder()
+    # ics_content = ics_builder.build(
+    #     classes,
+    #     semester_start="2026-10-01",
+    #     semester_end="2027-02-01",
+    # )
+    # ics_builder.write_file("schedule.ics", ics_content)
 
-    ics_builder = IcsBuilder()
-    ics_content = ics_builder.build(
-        classes,
-        semester_start="2026-02-23",
-        semester_end="2026-06-19",
-        free_days=["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-04-07", "2026-04-10", "2026-04-11",
-                   "2026-04-12", "2026-04-13", "2026-04-14", "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-24",
-                   "2026-06-04", "2026-04-05"],
-        day_overrides={
-            "2026-04-08": {"day": 4, "week": "tyg. II"},
-            "2026-05-08": {"day": 4, "week": "tyg. II"},
-            "2026-05-22": {"day": 4, "week": "tyg. II"},
-            "2026-06-03": {"day": 4, "week": "tyg. II"},
-            "2026-04-30": {"day": 4, "week": "tyg. I"},
-            "2026-05-15": {"day": 4, "week": "tyg. I"},
-            "2026-05-29": {"day": 4, "week": "tyg. I"},
-            "2026-06-12": {"day": 4, "week": "tyg. I"}
-        },
+    # Generowanie wydarzeń google
+    ics_builer = IcsBuilder()
+    occurrences = ics_builer.build_google(
+        events=classes,
+        semester_start="2026-10-01",
+        semester_end="2027-02-01"
     )
-    ics_builder.write_file("schedule.ics", ics_content)
 
-    # Upload do Google Calendar (odkomentuj po konfiguracji OAuth):
-    occurrences = ics_builder.expand_occurrences(
-        classes,
-        semester_start="2026-02-23",
-        semester_end="2026-06-19",
-        free_days=["2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06", "2026-04-07", "2026-04-10", "2026-04-11",
-                   "2026-04-12", "2026-04-13", "2026-04-14", "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-24",
-                   "2026-06-04", "2026-04-05"],
-        day_overrides={
-            "2026-04-08": {"day": 4, "week": "tyg. II"},
-            "2026-05-08": {"day": 4, "week": "tyg. II"},
-            "2026-05-22": {"day": 4, "week": "tyg. II"},
-            "2026-06-03": {"day": 4, "week": "tyg. II"},
-            "2026-04-30": {"day": 4, "week": "tyg. I"},
-            "2026-05-15": {"day": 4, "week": "tyg. I"},
-            "2026-05-29": {"day": 4, "week": "tyg. I"},
-            "2026-06-12": {"day": 4, "week": "tyg. I"}
-        },
-    )
-    gcal = GCalendarBuilder(credentials_path="credentials.json", token_path="token.pickle")
-    gcal.sync(calendar_id="8d2531d4acdb3ec2b84565f33372d00b60085e617ca3d31843f4a101b214d27e@group.calendar.google.com", occurrences=occurrences, timezone="Europe/Warsaw")
+    calendar_id = "fb71fba1febe4271f784c839e1c5b73d01e417d257c9036ae04c54d0d6565187@group.calendar.google.com"
+    gcalendar_builder = GCalendarBuilder("credentials.json", "token.pickle", "PBTimetableExtractor")
+    gcalendar_builder.sync(calendar_id=calendar_id, occurrences=occurrences)
