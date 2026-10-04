@@ -1,4 +1,4 @@
 schedule.ics
 token.pickle
-.idea
-.venv
+/.idea/
+/.venv/

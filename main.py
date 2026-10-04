@@ -3,12 +3,17 @@ import re
 import json
 import os
 import pickle
+import time
 from datetime import datetime, date, timedelta
 import uuid
 from collections import defaultdict
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+REQUEST_DELAY = 0.5
+MAX_RETRIES = 5
 
 class ScheduleParser:
     def __init__(self, link=None):
@@ -34,8 +39,10 @@ class ScheduleParser:
 
     def get_schedule(self):
         if self.link is not None:
+            print(f"Pobieranie planu z: {self.link}")
             response = requests.get(self.link)
             if response.status_code == 200:
+                print("Plan pobrany.")
                 return response.text
             print(f"Failed to retrieve schedule. Status code: {response.status_code}")
         return None
@@ -198,6 +205,7 @@ class GCalendarBuilder:
         self.service = self._build_service()
 
     def _build_service(self):
+        print("Uwierzytelnianie z Google Calendar...")
         creds = None
         if self.token_path and os.path.exists(self.token_path):
             with open(self.token_path, "rb") as token_file:
@@ -205,15 +213,30 @@ class GCalendarBuilder:
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
+                print("Odświeżanie tokenu...")
                 creds.refresh(Request())
             else:
+                print("Zaloguj się w przeglądarce...")
                 flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, self.SCOPES)
                 creds = flow.run_local_server(port=0)
 
             with open(self.token_path, "wb") as token_file:
                 pickle.dump(creds, token_file)
 
+        print("Zalogowano pomyślnie.")
         return build("calendar", "v3", credentials=creds)
+
+    def _execute(self, func):
+        delay = 1
+        for attempt in range(MAX_RETRIES):
+            try:
+                return func()
+            except HttpError as e:
+                if e.resp.status not in (403, 429, 500, 502, 503) or attempt == MAX_RETRIES - 1:
+                    raise
+                print(f"\rBłąd {e.resp.status}, ponawiam za {delay}s...", end="", flush=True)
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
 
     def _group_for_series(self, occurrences):
         groups = defaultdict(list)
@@ -231,13 +254,15 @@ class GCalendarBuilder:
     def _iter_managed_events(self, calendar_id: str):
         page_token = None
         while True:
-            resp = self.service.events().list(
-                calendarId=calendar_id,
-                maxResults=2500,
-                singleEvents=False,
-                pageToken=page_token,
-                privateExtendedProperty="pbte=1",
-            ).execute()
+            resp = self._execute(
+                lambda: self.service.events().list(
+                    calendarId=calendar_id,
+                    maxResults=2500,
+                    singleEvents=False,
+                    pageToken=page_token,
+                    privateExtendedProperty="pbte=1",
+                ).execute()
+            )
             for item in resp.get("items", []):
                 yield item
             page_token = resp.get("nextPageToken")
@@ -246,12 +271,26 @@ class GCalendarBuilder:
 
     def sync(self, calendar_id: str, occurrences, timezone="Europe/Warsaw", purge_managed=True):
         if purge_managed:
-            for ev in self._iter_managed_events(calendar_id):
-                self.service.events().delete(calendarId=calendar_id, eventId=ev["id"]).execute()
+            print("Pobieranie starych wydarzeń planu...")
+            managed = list(self._iter_managed_events(calendar_id))
+            total = len(managed)
+            if total == 0:
+                print("Brak starych wydarzeń do usunięcia.")
+            for i, ev in enumerate(managed, 1):
+                self._execute(
+                    lambda ev=ev: self.service.events().delete(
+                        calendarId=calendar_id, eventId=ev["id"]
+                    ).execute()
+                )
+                print(f"\rUsuwanie ({i}/{total}): {ev.get('summary')}", end="", flush=True)
+                time.sleep(REQUEST_DELAY)
+            if total:
+                print(f"\nUsunięto: {total}")
 
         grouped = self._group_for_series(occurrences)
+        total_groups = len(grouped)
 
-        for (summary, location, description, start_time, end_time), items in grouped.items():
+        for i, ((summary, location, description, start_time, end_time), items) in enumerate(grouped.items(), 1):
             items = sorted(items, key=lambda x: x["start"])
             first = items[0]
             start_iso = first["start"].isoformat()
@@ -275,13 +314,21 @@ class GCalendarBuilder:
                 rdates = ",".join(x["start"].strftime("%Y%m%dT%H%M%S") for x in items[1:])
                 body["recurrence"] = [f"RDATE;TZID={timezone}:{rdates}"]
 
-            self.service.events().insert(calendarId=calendar_id, body=body).execute()
+            self._execute(
+                lambda body=body: self.service.events().insert(calendarId=calendar_id, body=body).execute()
+            )
+            print(f"\rDodawanie ({i}/{total_groups}): {summary}", end="", flush=True)
+            time.sleep(REQUEST_DELAY)
+
+        if total_groups:
+            print(f"\nDodano: {total_groups}")
 
 
 if __name__ == "__main__":
     link = "https://degra.wi.pb.edu.pl/rozklady/rozklad.php?page=student&studia=INF2&semestr=2&spec=ITI&grw=1&grcw=1&grps=1&grp=1&grl=1&grj=1&grs=1&grwf=1"
     parser = ScheduleParser(link)
     classes = parser.parse_from_link()
+    print(f"Sparsowano {len(classes)} zajęć.")
     print(json.dumps(classes, ensure_ascii=False, indent=2))
 
     # Generowanie pliku .ics:
@@ -298,8 +345,36 @@ if __name__ == "__main__":
     occurrences = ics_builer.build_google(
         events=classes,
         semester_start="2026-10-01",
-        semester_end="2027-02-01"
+        semester_end="2027-02-03",
+        free_days=[
+            "2026-10-31",
+            "2026-11-1","2026-11-9","2026-11-10","2026-11-11",
+            "2026-12-24","2026-12-25","2026-12-26","2026-12-27","2026-12-28","2026-12-29","2026-12-30","2026-12-31",
+            "2027-01-01","2027-01-02","2027-01-03","2027-01-04","2027-01-05","2027-01-06","2027-01-07","2027-01-08"
+        ],
+        day_overrides={
+            # czwartki do 19 listopada (włącznie) mają mieć tyg I a potem do końca tyg II
+            "2026-10-01": {"week": "tyg. I"},
+            "2026-10-08": {"week": "tyg. I"},
+            "2026-10-15": {"week": "tyg. I"},
+            "2026-10-22": {"week": "tyg. I"},
+            "2026-10-29": {"week": "tyg. I"},
+            "2026-11-05": {"week": "tyg. I"},
+            "2026-11-12": {"week": "tyg. I"},
+            "2026-11-19": {"week": "tyg. I"},
+            "2026-11-26": {"week": "tyg. II"},
+            "2026-12-03": {"week": "tyg. II"},
+            "2026-12-10": {"week": "tyg. II"},
+            "2026-12-17": {"week": "tyg. II"},
+            "2026-12-24": {"week": "tyg. II"},
+            "2026-12-31": {"week": "tyg. II"},
+            "2027-01-07": {"week": "tyg. II"},
+            "2027-01-14": {"week": "tyg. II"},
+            "2027-01-21": {"week": "tyg. II"},
+            "2027-01-28": {"week": "tyg. II"},
+        }
     )
+    print(f"Wygenerowano {len(occurrences)} terminów.")
 
     calendar_id = "fb71fba1febe4271f784c839e1c5b73d01e417d257c9036ae04c54d0d6565187@group.calendar.google.com"
     gcalendar_builder = GCalendarBuilder("credentials.json", "token.pickle", "PBTimetableExtractor")
