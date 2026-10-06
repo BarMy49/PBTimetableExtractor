@@ -10,6 +10,8 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+import console
+
 REQUEST_DELAY = 0.5
 MAX_RETRIES = 5
 
@@ -143,7 +145,7 @@ class IcsExporter:
         lines.append("END:VCALENDAR")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
-        print(f"Zapisano plik .ics: {out_path}")
+        console.success(f"Zapisano plik .ics: {out_path}")
         return occurrences
 
 
@@ -157,7 +159,7 @@ class GoogleCalendarExporter:
         self.service = self._build_service()
 
     def _build_service(self):
-        print("Uwierzytelnianie z Google Calendar...")
+        console.info("Uwierzytelnianie z Google Calendar...")
         creds = None
         if self.token_path and os.path.exists(self.token_path):
             with open(self.token_path, "rb") as token_file:
@@ -165,17 +167,17 @@ class GoogleCalendarExporter:
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                print("Odświeżanie tokenu...")
+                console.info("Odświeżanie tokenu...")
                 creds.refresh(Request())
             else:
-                print("Zaloguj się w przeglądarce...")
+                console.info("Zaloguj się w przeglądarce...")
                 flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, self.SCOPES)
                 creds = flow.run_local_server(port=0)
 
             with open(self.token_path, "wb") as token_file:
                 pickle.dump(creds, token_file)
 
-        print("Zalogowano pomyślnie.")
+        console.success("Zalogowano pomyślnie.")
         return build("calendar", "v3", credentials=creds)
 
     def _execute(self, func):
@@ -186,7 +188,7 @@ class GoogleCalendarExporter:
             except HttpError as e:
                 if e.resp.status not in (403, 429, 500, 502, 503) or attempt == MAX_RETRIES - 1:
                     raise
-                print(f"\rBłąd {e.resp.status}, ponawiam za {delay}s...", end="", flush=True)
+                console.warning(f"Błąd {e.resp.status}, ponawiam za {delay}s...")
                 time.sleep(delay)
                 delay = min(delay * 2, 30)
 
@@ -222,11 +224,11 @@ class GoogleCalendarExporter:
                 break
 
     def _purge_managed(self, calendar_id: str):
-        print("Pobieranie starych wydarzeń planu...")
+        console.info("Pobieranie starych wydarzeń planu...")
         managed = list(self._iter_managed_events(calendar_id))
         total = len(managed)
         if total == 0:
-            print("Brak starych wydarzeń do usunięcia.")
+            console.info("Brak starych wydarzeń do usunięcia.")
             return
         for i, ev in enumerate(managed, 1):
             self._execute(
@@ -234,9 +236,10 @@ class GoogleCalendarExporter:
                     calendarId=calendar_id, eventId=ev["id"]
                 ).execute()
             )
-            print(f"\rUsuwanie ({i}/{total}): {ev.get('summary')}", end="", flush=True)
+            console.progress(f"Usuwanie ({i}/{total}): {ev.get('summary')}")
             time.sleep(REQUEST_DELAY)
-        print(f"\nUsunięto: {total}")
+        print()
+        console.success(f"Usunięto: {total}")
 
     def sync(self, calendar_id: str, data, timezone="Europe/Warsaw", purge_managed=True):
         occurrences = _expand_from_data(data)
@@ -274,11 +277,12 @@ class GoogleCalendarExporter:
             self._execute(
                 lambda body=body: self.service.events().insert(calendarId=calendar_id, body=body).execute()
             )
-            print(f"\rDodawanie ({i}/{total_groups}): {summary}", end="", flush=True)
+            console.progress(f"Dodawanie ({i}/{total_groups}): {summary}")
             time.sleep(REQUEST_DELAY)
 
         if total_groups:
-            print(f"\nDodano: {total_groups}")
+            print()
+            console.success(f"Dodano: {total_groups}")
 
     def clear(self, calendar_id: str):
         self._purge_managed(calendar_id)

@@ -4,6 +4,7 @@ import io
 import math
 import os
 import queue
+import re
 import threading
 import traceback
 from datetime import date, datetime
@@ -777,7 +778,8 @@ class TimetableGui:
         x_scroll = ttk.Scrollbar(window, orient="horizontal", command=text.xview)
         x_scroll.pack(fill="x", padx=12, pady=(0, 10))
         text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-        text.insert("1.0", view.TimetableViewer(data).render())
+        rendered = view.TimetableViewer(data).render()
+        text.insert("1.0", re.sub(r"\x1b\[[0-9;]*m", "", rendered))
         text.configure(state="disabled")
 
     def _save_view_pdf(self, parent, data):

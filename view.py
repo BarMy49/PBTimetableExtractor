@@ -1,6 +1,8 @@
 import os
 from datetime import datetime
 
+import console
+
 WEEKDAY_NAMES = ("Pon", "Wt", "Śr", "Czw", "Pt")
 WEEKDAY_LONG = ("Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek")
 WEEK_NAMES = ("Tydzień I", "Tydzień II")
@@ -142,13 +144,13 @@ class TimetableViewer:
         return lines
 
     def render(self):
-        parts = ["PLAN ZAJĘĆ"]
+        parts = [console.styled("PLAN ZAJĘĆ", "bold")]
         for parity, week_name in enumerate(WEEK_NAMES):
             parts.append("")
-            parts.append(week_name.upper())
+            parts.append(console.styled(week_name.upper(), "bold_cyan"))
             parts.append(self._render_grid(parity))
         parts.append("")
-        parts.append("MODYFIKACJE")
+        parts.append(console.styled("MODYFIKACJE", "bold_cyan"))
         parts.extend(self._modification_lines())
         return "\n".join(parts)
 
@@ -174,7 +176,7 @@ class TimetableViewer:
             pdf.add_font("Arial", "B", bold)
             font_family = "Arial"
         else:
-            print("Ostrzeżenie: nie znaleziono czcionki TTF — polskie znaki mogą nie wyświetlać się poprawnie.")
+            console.warning("Nie znaleziono czcionki TTF — polskie znaki mogą nie wyświetlać się poprawnie.")
             font_family = "helvetica"
 
         pdf.set_auto_page_break(auto=True, margin=12)
@@ -199,7 +201,7 @@ class TimetableViewer:
             pdf.multi_cell(0, 5, line, new_x="LMARGIN", new_y="NEXT")
 
         pdf.output(path)
-        print(f"Zapisano plik PDF: {path}")
+        console.success(f"Zapisano plik PDF: {path}")
 
     def _draw_pdf_grid(self, pdf, font_family, parity):
         from fpdf import FontFace

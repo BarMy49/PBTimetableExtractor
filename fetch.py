@@ -3,6 +3,8 @@ import re
 
 import requests
 
+import console
+
 
 class ScheduleDownloader:
     def __init__(self, link=None):
@@ -28,12 +30,12 @@ class ScheduleDownloader:
 
     def get_schedule(self):
         if self.link is not None:
-            print(f"Pobieranie planu z: {self.link}")
+            console.info(f"Pobieranie planu z: {self.link}")
             response = requests.get(self.link)
             if response.status_code == 200:
-                print("Plan pobrany.")
+                console.success("Plan pobrany.")
                 return response.text
-            print(f"Failed to retrieve schedule. Status code: {response.status_code}")
+            console.error(f"Failed to retrieve schedule. Status code: {response.status_code}")
         return None
 
     def parse(self, html):
@@ -79,5 +81,5 @@ class ScheduleDownloader:
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"Sparsowano {len(events)} zajęć i zapisano do: {path}")
+        console.success(f"Sparsowano {len(events)} zajęć i zapisano do: {path}")
         return events

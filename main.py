@@ -1,6 +1,7 @@
-from fetch import ScheduleDownloader
+import console
 from edit import ScheduleEditor
 from export import GoogleCalendarExporter
+from fetch import ScheduleDownloader
 from view import TimetableViewer
 
 JSON_PATH = "schedule.json"
@@ -9,9 +10,11 @@ CALENDAR_ID = "fb71fba1febe4271f784c839e1c5b73d01e417d257c9036ae04c54d0d6565187@
 
 
 def main():
+    console.header("1. Pobieranie planu")
     downloader = ScheduleDownloader(LINK)
     downloader.download_to_json(JSON_PATH)
 
+    console.header("2. Edycja planu")
     editor = ScheduleEditor(JSON_PATH)
     editor.load()
     editor.set_semester("2026-10-01", "2027-02-03")
@@ -53,11 +56,13 @@ def main():
 
     editor.save()
 
+    console.header("3. Wizualizacja planu")
     # Wizualizacja planu: siatka na konsolę + zapis do PDF
     viewer = TimetableViewer(editor.to_dict())
     print(viewer.render())
     viewer.save_pdf("schedule.pdf")
 
+    console.header("4. Synchronizacja z Google Calendar")
     # Google Calendar (po OAuth2)
     exporter = GoogleCalendarExporter("credentials.json", "token.pickle", "PBTimetableExtractor")
     exporter.sync(calendar_id=CALENDAR_ID, data=editor.to_dict())
