@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 WEEKDAY_NAMES = ("Pon", "Wt", "Śr", "Czw", "Pt")
 WEEKDAY_LONG = ("Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek")
@@ -55,7 +56,10 @@ class TimetableViewer:
 
     def _build_week(self, parity):
         events = self.data.get("events", [])
-        slots = sorted({(e.get("start"), e.get("end")) for e in events if e.get("start")})
+        slots = sorted(
+            {(e.get("start"), e.get("end")) for e in events if e.get("start")},
+            key=lambda slot: (datetime.strptime(slot[0], "%H:%M"), datetime.strptime(slot[1], "%H:%M")),
+        )
         grid = {slot: {day: [] for day in range(5)} for slot in slots}
         for event in events:
             if not self._week_matches(event, parity):
@@ -179,6 +183,8 @@ class TimetableViewer:
         pdf.cell(0, 10, "Plan zajęć", new_x="LMARGIN", new_y="NEXT", align="C")
 
         for parity, week_name in enumerate(WEEK_NAMES):
+            if parity > 0:
+                pdf.add_page()
             pdf.set_font(font_family, "B", 13)
             pdf.cell(0, 8, week_name, new_x="LMARGIN", new_y="NEXT")
             pdf.ln(2)
@@ -202,12 +208,34 @@ class TimetableViewer:
         pdf.set_font(font_family, "", 9)
         if not slots:
             pdf.cell(0, 6, "(brak zajęć)", new_x="LMARGIN", new_y="NEXT")
-            pdf.ln(4)
             return
 
-        header_style = FontFace(family=font_family, emphasis="BOLD", size_pt=9, fill_color=(226, 239, 235))
         col_widths = [24] + [47] * 5
-        with pdf.table(col_widths=col_widths, borders_layout="ALL", line_height=4.6, repeat_headings=1) as table:
+        base_size = 9.0
+        base_line_height = 4.6
+        cell_width = col_widths[1] - 2
+
+        row_lines = []
+        for slot in slots:
+            max_lines = 1
+            for day in range(5):
+                text = "\n".join(grid[slot][day]) if grid[slot][day] else ""
+                if not text:
+                    continue
+                pdf.set_font(font_family, "", base_size)
+                lines = pdf.multi_cell(cell_width, base_line_height, text, dry_run=True, output="LINES")
+                max_lines = max(max_lines, len(lines))
+            row_lines.append(max_lines)
+
+        available = pdf.h - pdf.t_margin - pdf.b_margin - 22
+        total = (1 + sum(row_lines)) * base_line_height + 2
+        scale = min(1.0, available / total)
+        size = max(5.0, base_size * scale)
+        line_height = base_line_height * scale
+
+        header_style = FontFace(family=font_family, emphasis="BOLD", size_pt=size, fill_color=(226, 239, 235))
+        pdf.set_font(font_family, "", size)
+        with pdf.table(col_widths=col_widths, borders_layout="ALL", line_height=line_height, repeat_headings=1) as table:
             header = table.row()
             header.cell("Godzina", style=header_style)
             for day_name in WEEKDAY_NAMES:

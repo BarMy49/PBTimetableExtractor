@@ -59,8 +59,8 @@ def main():
     viewer.save_pdf("schedule.pdf")
 
     # Google Calendar (po OAuth2)
-    # exporter = GoogleCalendarExporter("credentials.json", "token.pickle", "PBTimetableExtractor")
-    # exporter.sync(calendar_id=CALENDAR_ID, data=editor.to_dict())
+    exporter = GoogleCalendarExporter("credentials.json", "token.pickle", "PBTimetableExtractor")
+    exporter.sync(calendar_id=CALENDAR_ID, data=editor.to_dict())
 
     # Alternatywnie eksport do pliku .ics:
     # from export import IcsExporter
