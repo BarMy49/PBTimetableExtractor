@@ -9,10 +9,12 @@ import traceback
 from datetime import date, datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
-import main as timetable
-import truncateCalendar
+import fetch
+import edit
+import export
+import view
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -270,6 +272,8 @@ class TimetableGui:
         self.selected_date = self.today
         self.free_days = set()
         self.day_overrides = {}
+        self.subject_ranges = {}
+        self.subject_options = {}
         self.job_queue = queue.Queue()
         self.job_running = False
         self.fullscreen = False
@@ -282,6 +286,9 @@ class TimetableGui:
         self.week_var = tk.StringVar(value="Automatycznie")
         self.day_var = tk.StringVar(value="Jak w kalendarzu")
         self.free_day_var = tk.BooleanVar(value=False)
+        self.subjects_var = tk.StringVar(value="")
+        self.range_start_var = tk.StringVar(value="")
+        self.range_end_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Gotowy")
         self.dark_mode_var = tk.BooleanVar(value=False)
 
@@ -427,10 +434,28 @@ class TimetableGui:
         self.day_combo.bind("<<ComboboxSelected>>", self._save_override)
         ttk.Label(side, text="Dzień wolny pomija ustawione nadpisanie.", style="Muted.TLabel", wraplength=310).grid(row=21, column=0, sticky="w", pady=(0, 11))
 
+        ttk.Separator(side).grid(row=22, column=0, sticky="ew", pady=(0, 12))
+        ttk.Label(side, text="Zakres przedmiotu", style="Section.TLabel").grid(row=23, column=0, sticky="w", pady=(0, 7))
+        self.fetch_subjects_button = SquircleButton(side, "Pobierz przedmioty", self._fetch_subjects, "neutral", self.colors, height=30)
+        self.fetch_subjects_button.grid(row=24, column=0, sticky="ew", pady=(0, 7))
+        self.subjects_combo = ttk.Combobox(side, textvariable=self.subjects_var, values=(), state="readonly")
+        self.subjects_combo.grid(row=25, column=0, sticky="ew", pady=(0, 7))
+        ttk.Label(side, text="Od (RRRR-MM-DD)", style="Panel.TLabel").grid(row=26, column=0, sticky="w")
+        ttk.Entry(side, textvariable=self.range_start_var).grid(row=27, column=0, sticky="ew", pady=(4, 7))
+        ttk.Label(side, text="Do (RRRR-MM-DD)", style="Panel.TLabel").grid(row=28, column=0, sticky="w")
+        ttk.Entry(side, textvariable=self.range_end_var).grid(row=29, column=0, sticky="ew", pady=(4, 7))
+        self.apply_range_button = SquircleButton(side, "Ustaw zakres", self._apply_subject_range, "neutral", self.colors, height=32)
+        self.apply_range_button.grid(row=30, column=0, sticky="ew", pady=(0, 5))
+        self.remove_range_button = SquircleButton(side, "Wyczyść zakres", self._clear_subject_range, "neutral", self.colors, height=30)
+        self.remove_range_button.grid(row=31, column=0, sticky="ew", pady=(0, 7))
+        ttk.Label(side, text="Zakres dat zastępuje tydzień (tyg. I/II) dla wybranego przedmiotu.", style="Muted.TLabel", wraplength=310).grid(row=32, column=0, sticky="w", pady=(0, 11))
+
+        self.show_plan_button = SquircleButton(side, "Pokaż plan", self._show_plan, "neutral", self.colors, height=36)
+        self.show_plan_button.grid(row=33, column=0, sticky="ew", pady=(0, 7))
         self.sync_button = SquircleButton(side, "Synchronizuj z Google Calendar", self._sync_calendar, "primary", self.colors, height=40)
-        self.sync_button.grid(row=22, column=0, sticky="ew", pady=(4, 7))
+        self.sync_button.grid(row=34, column=0, sticky="ew", pady=(4, 7))
         self.clear_button = SquircleButton(side, "Usuń wygenerowane wydarzenia", self._clear_calendar, "danger", self.colors, height=38)
-        self.clear_button.grid(row=23, column=0, sticky="ew")
+        self.clear_button.grid(row=35, column=0, sticky="ew")
 
         log_frame = ttk.Frame(outer, padding=(0, 10, 0, 0))
         log_frame.grid(row=2, column=0, sticky="ew")
@@ -466,6 +491,10 @@ class TimetableGui:
         self.next_button.set_colors(self.colors)
         self.sync_button.set_colors(self.colors)
         self.clear_button.set_colors(self.colors)
+        self.fetch_subjects_button.set_colors(self.colors)
+        self.apply_range_button.set_colors(self.colors)
+        self.remove_range_button.set_colors(self.colors)
+        self.show_plan_button.set_colors(self.colors)
         self.log.configure(bg=self.colors["panel"], fg=self.colors["muted"])
         for swatch, color_key in self.legend_swatches:
             swatch.configure(bg=self.colors[color_key])
@@ -634,6 +663,138 @@ class TimetableGui:
             self.day_overrides.pop(date_key, None)
         self._draw_calendar()
 
+    def _fetch_subjects(self):
+        link = self.link_var.get().strip()
+        if not link:
+            messagebox.showerror("Nieprawidłowe dane", "Podaj link do planu zajęć.", parent=self.root)
+            return
+
+        def operation():
+            downloader = fetch.ScheduleDownloader(link)
+            classes = downloader.fetch()
+            if not classes:
+                raise ValueError("Nie udało się pobrać zajęć z planu.")
+            self.job_queue.put(("subjects", classes))
+
+        self._start_job("Pobieranie przedmiotów", operation)
+
+    def _update_subjects(self, classes):
+        pairs = sorted({(event.get("subject"), event.get("class_type")) for event in classes})
+        self.subject_options = {f'{subject} ({class_type})': (subject, class_type) for subject, class_type in pairs}
+        labels = list(self.subject_options)
+        self.subjects_combo.configure(values=labels)
+        self.subjects_var.set(labels[0] if labels else "")
+
+    def _selected_subject_key(self):
+        label = self.subjects_var.get()
+        if label not in self.subject_options:
+            raise ValueError("Wybierz przedmiot z listy (najpierw kliknij „Pobierz przedmioty”).")
+        return self.subject_options[label]
+
+    def _read_range_dates(self):
+        start_text = self.range_start_var.get().strip()
+        end_text = self.range_end_var.get().strip()
+        if not start_text or not end_text:
+            raise ValueError("Podaj datę początku i końca zakresu (RRRR-MM-DD).")
+        start = datetime.strptime(start_text, "%Y-%m-%d").date()
+        end = datetime.strptime(end_text, "%Y-%m-%d").date()
+        if start > end:
+            raise ValueError("Początek zakresu musi przypadać przed jego końcem.")
+        return start_text, end_text
+
+    def _apply_subject_range(self):
+        try:
+            subject, class_type = self._selected_subject_key()
+            start_text, end_text = self._read_range_dates()
+        except ValueError as error:
+            messagebox.showerror("Nieprawidłowe dane", str(error), parent=self.root)
+            return
+        self.subject_ranges[(subject, class_type)] = {"start": start_text, "end": end_text}
+        self._append_log(f"Zakres {subject} ({class_type}): {start_text} – {end_text}\n")
+
+    def _clear_subject_range(self):
+        try:
+            subject, class_type = self._selected_subject_key()
+        except ValueError as error:
+            messagebox.showerror("Nieprawidłowe dane", str(error), parent=self.root)
+            return
+        if (subject, class_type) in self.subject_ranges:
+            del self.subject_ranges[(subject, class_type)]
+            self._append_log(f"Usunięto zakres dla: {subject} ({class_type})\n")
+
+    def _show_plan(self):
+        link = self.link_var.get().strip()
+        if not link:
+            messagebox.showerror("Nieprawidłowe dane", "Podaj link do planu zajęć.", parent=self.root)
+            return
+        try:
+            start, end = self._read_semester_dates()
+        except ValueError as error:
+            messagebox.showerror("Nieprawidłowe dane", str(error), parent=self.root)
+            return
+        free_days = sorted(day.isoformat() for day in self.free_days)
+        day_overrides = {key: value.copy() for key, value in self.day_overrides.items()}
+        subject_ranges = {key: value.copy() for key, value in self.subject_ranges.items()}
+
+        def operation():
+            downloader = fetch.ScheduleDownloader(link)
+            classes = downloader.fetch()
+            if not classes:
+                raise ValueError("Nie udało się pobrać zajęć z planu.")
+            for (subject, class_type), date_range in subject_ranges.items():
+                edit.apply_subject_date_range(classes, subject, class_type, date_range["start"], date_range["end"])
+            data = {
+                "source": link,
+                "events": classes,
+                "semester_start": start.isoformat(),
+                "semester_end": end.isoformat(),
+                "free_days": free_days,
+                "day_overrides": day_overrides,
+            }
+            self.job_queue.put(("view", data))
+
+        self._start_job("Przygotowywanie widoku planu", operation)
+
+    def _open_plan_window(self, data):
+        window = tk.Toplevel(self.root)
+        window.title("Podgląd planu")
+        window.geometry("1250x800")
+        window.configure(bg=self.colors["background"])
+
+        toolbar = ttk.Frame(window)
+        toolbar.pack(fill="x", padx=12, pady=(10, 6))
+        save_button = SquircleButton(toolbar, "Zapisz PDF", lambda: self._save_view_pdf(window, data), "primary", self.colors, width=160, height=36)
+        save_button.pack(side="left", padx=(0, 8))
+        close_button = SquircleButton(toolbar, "Zamknij", window.destroy, "neutral", self.colors, width=120, height=36)
+        close_button.pack(side="left")
+
+        text_frame = ttk.Frame(window)
+        text_frame.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        text = tk.Text(text_frame, wrap="none", bg=self.colors["panel"], fg=self.colors["text"], relief="flat", font=("Consolas", 9), padx=10, pady=8)
+        text.pack(side="left", fill="both", expand=True)
+        y_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=text.yview)
+        y_scroll.pack(side="right", fill="y")
+        x_scroll = ttk.Scrollbar(window, orient="horizontal", command=text.xview)
+        x_scroll.pack(fill="x", padx=12, pady=(0, 10))
+        text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        text.insert("1.0", view.TimetableViewer(data).render())
+        text.configure(state="disabled")
+
+    def _save_view_pdf(self, parent, data):
+        path = filedialog.asksaveasfilename(
+            parent=parent,
+            title="Zapisz plan jako PDF",
+            defaultextension=".pdf",
+            initialfile="schedule.pdf",
+            filetypes=[("Plik PDF", "*.pdf")],
+        )
+        if not path:
+            return
+        try:
+            view.TimetableViewer(data).save_pdf(path)
+        except Exception as error:
+            messagebox.showerror("Błąd zapisu", str(error), parent=parent)
+
     def _validate_inputs(self):
         link = self.link_var.get().strip()
         calendar_id = self.calendar_id_var.get().strip()
@@ -659,16 +820,25 @@ class TimetableGui:
 
         free_days = sorted(day.isoformat() for day in self.free_days)
         day_overrides = {key: value.copy() for key, value in self.day_overrides.items()}
-        self._start_job("Synchronizacja planu", lambda: self._do_sync(link, calendar_id, start, end, free_days, day_overrides))
+        subject_ranges = {key: value.copy() for key, value in self.subject_ranges.items()}
+        self._start_job("Synchronizacja planu", lambda: self._do_sync(link, calendar_id, start, end, free_days, day_overrides, subject_ranges))
 
     @staticmethod
-    def _do_sync(link, calendar_id, start, end, free_days, day_overrides):
-        parser = timetable.ScheduleParser(link)
-        classes = parser.parse_from_link()
+    def _do_sync(link, calendar_id, start, end, free_days, day_overrides, subject_ranges=None):
+        downloader = fetch.ScheduleDownloader(link)
+        classes = downloader.fetch()
         if not classes:
             raise ValueError("Nie udało się pobrać zajęć z planu. Kalendarz nie został zmieniony.")
-        builder = timetable.IcsBuilder()
-        occurrences = builder.build_google(
+        for (subject, class_type), date_range in (subject_ranges or {}).items():
+            edit.apply_subject_date_range(classes, subject, class_type, date_range["start"], date_range["end"])
+        data = {
+            "events": classes,
+            "semester_start": start.isoformat(),
+            "semester_end": end.isoformat(),
+            "free_days": free_days,
+            "day_overrides": day_overrides,
+        }
+        occurrences = export.expand_occurrences(
             events=classes,
             semester_start=start.isoformat(),
             semester_end=end.isoformat(),
@@ -677,12 +847,12 @@ class TimetableGui:
         )
         if not occurrences:
             raise ValueError("Brak wydarzeń w wybranym zakresie. Kalendarz nie został zmieniony.")
-        calendar_builder = timetable.GCalendarBuilder(
+        exporter = export.GoogleCalendarExporter(
             str(BASE_DIR / "credentials.json"),
             str(BASE_DIR / "token.pickle"),
             "PBTimetableExtractor",
         )
-        calendar_builder.sync(calendar_id=calendar_id, occurrences=occurrences, purge_managed=True)
+        exporter.sync(calendar_id=calendar_id, data=data, purge_managed=True)
 
     def _clear_calendar(self):
         calendar_id = self.calendar_id_var.get().strip()
@@ -695,7 +865,12 @@ class TimetableGui:
             parent=self.root,
         ):
             return
-        self._start_job("Usuwanie wygenerowanych wydarzeń", lambda: truncateCalendar.delete_all_events(calendar_id))
+        exporter = export.GoogleCalendarExporter(
+            str(BASE_DIR / "credentials.json"),
+            str(BASE_DIR / "token.pickle"),
+            "PBTimetableExtractor",
+        )
+        self._start_job("Usuwanie wygenerowanych wydarzeń", lambda: exporter.clear(calendar_id))
 
     def _start_job(self, label, operation):
         if self.job_running:
@@ -704,6 +879,7 @@ class TimetableGui:
         self.status_var.set(label + "…")
         self.sync_button.set_enabled(False)
         self.clear_button.set_enabled(False)
+        self.show_plan_button.set_enabled(False)
         self._append_log(label + "…\n")
 
         def run():
@@ -722,10 +898,15 @@ class TimetableGui:
                 kind, payload = self.job_queue.get_nowait()
                 if kind == "log":
                     self._append_log(payload)
+                elif kind == "subjects":
+                    self._update_subjects(payload)
+                elif kind == "view":
+                    self._open_plan_window(payload)
                 elif kind == "done":
                     self.job_running = False
                     self.sync_button.set_enabled(True)
                     self.clear_button.set_enabled(True)
+                    self.show_plan_button.set_enabled(True)
                     if payload is None:
                         self.status_var.set("Zakończono")
                         self._append_log("Gotowe.\n")

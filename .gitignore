@@ -1,4 +1,6 @@
 schedule.ics
+schedule.json
+schedule.pdf
 token.pickle
 /.idea/
 /.venv/
